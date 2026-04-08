@@ -175,7 +175,7 @@ def select_model_features(df: pd.DataFrame) -> pd.DataFrame:
         # College production
         "college_rec_yards", "college_rec_tds", "college_targets",
         "college_rush_yards", "college_rush_tds",
-        "college_dominator_rate",
+        "college_dominator_rate", "college_years",
         # Position dummies
         "pos_QB", "pos_RB", "pos_WR", "pos_TE",
     ]
