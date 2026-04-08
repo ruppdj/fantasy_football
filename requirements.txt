@@ -1,0 +1,12 @@
+nfl_data_py
+requests
+pandas
+sqlalchemy
+matplotlib
+seaborn
+scikit-learn
+xgboost
+jupyter
+pyarrow
+fastparquet
+numpy
