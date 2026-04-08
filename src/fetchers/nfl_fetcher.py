@@ -271,16 +271,18 @@ def fetch_injuries(seasons: list = DEFAULT_SEASONS, force: bool = False) -> pd.D
         df = nfl.import_injuries([season])
         df = df[df["game_type"] == "REG"].copy() if "game_type" in df.columns else df.copy()
 
-        # Aggregate to season level per player
+        # report_status values: "Out", "Doubtful", "Questionable", "Probable"
+        # IR is a roster transaction — not a report_status value. Use games_missed >= 4
+        # as a proxy (IR stints require missing at least 4 games).
         df["is_out"] = df["report_status"].isin(["Out", "Doubtful"]).astype(int)
-        df["is_ir"] = df["report_status"].str.contains("IR", na=False).astype(int)
 
         agg = (
             df.groupby(["gsis_id", "season"])
-            .agg(games_missed=("is_out", "sum"), ir_flag=("is_ir", "max"))
+            .agg(games_missed=("is_out", "sum"))
             .reset_index()
             .rename(columns={"gsis_id": "player_id"})
         )
+        agg["ir_flag"] = (agg["games_missed"] >= 4).astype(int)
         agg.to_parquet(season_cache, index=False)
         frames.append(agg)
         print(f"{len(agg)} player-season injury records saved")

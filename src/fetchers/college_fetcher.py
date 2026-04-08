@@ -1,7 +1,17 @@
 """
 college_fetcher.py
 Pulls final-year college production stats for NFL draft prospects via the
-College Football Data API (CFBD) — free, no auth required for basic endpoints.
+College Football Data API (CFBD).
+
+Authentication: CFBD requires a free API key (get one at https://collegefootballdata.com/key).
+Set it as an environment variable before running:
+
+    export CFBD_API_KEY="your_key_here"
+
+Or set it in the notebook before calling fetch_college_stats():
+
+    import os
+    os.environ["CFBD_API_KEY"] = "your_key_here"
 
 Join path:
   draft_picks.cfb_player_id → CFBD player ID → college season stats
@@ -32,17 +42,35 @@ def _season_cache_path(prefix: str, season: int) -> str:
     return os.path.join(RAW_DIR, f"{prefix}_{season}.parquet")
 
 
+def _get_cfbd_headers() -> dict:
+    """
+    Return Authorization header for CFBD API.
+    Raises ValueError with setup instructions if key is missing.
+    """
+    api_key = os.environ.get("CFBD_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError(
+            "CFBD_API_KEY not set. Get a free key at https://collegefootballdata.com/key\n"
+            "Then set it with: os.environ['CFBD_API_KEY'] = 'your_key_here'"
+        )
+    return {"Authorization": f"Bearer {api_key}"}
+
+
 def _fetch_cfbd_stats(year: int, category: str) -> list:
     """
     Fetch one category of player stats for one college season from CFBD.
-    Returns list of raw stat dicts.
+    Returns list of raw stat dicts, or [] on error.
     """
     url = f"{CFBD_BASE}/stats/player/season"
     params = {"year": year, "seasonType": "regular", "category": category}
     try:
-        resp = requests.get(url, params=params, timeout=20)
+        headers = _get_cfbd_headers()
+        resp = requests.get(url, params=params, headers=headers, timeout=20)
         resp.raise_for_status()
         return resp.json()
+    except ValueError as e:
+        print(f"    Error: {e}")
+        return []
     except requests.RequestException as e:
         print(f"    Warning: CFBD request failed for {year}/{category}: {e}")
         return []
@@ -64,6 +92,13 @@ def fetch_college_stats(draft_seasons: list, force: bool = False) -> pd.DataFram
     Cached per college season at data/raw/college_stats_{year}.parquet.
     Combined result at data/raw/college_stats.parquet.
     """
+    # Fail fast if API key is missing — better than looping and failing on every season
+    try:
+        _get_cfbd_headers()
+    except ValueError as e:
+        print(f"Cannot fetch college stats: {e}")
+        return pd.DataFrame()
+
     combined_cache = _cache_path("college_stats")
     frames = []
 
