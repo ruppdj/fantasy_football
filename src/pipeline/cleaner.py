@@ -170,12 +170,25 @@ def merge_draft_data(nfl_df: pd.DataFrame, draft_df: pd.DataFrame) -> pd.DataFra
     return merged
 
 
+def _parse_height_to_inches(h) -> float:
+    """Convert '6-3' (feet-inches) to total inches (75.0). Returns NaN on failure."""
+    if pd.isna(h):
+        return float("nan")
+    try:
+        feet, inches = str(h).split("-")
+        return int(feet) * 12 + int(inches)
+    except Exception:
+        return pd.to_numeric(h, errors="coerce")
+
+
 def merge_combine_data(nfl_df: pd.DataFrame, combine_df: pd.DataFrame,
                        rosters_df: pd.DataFrame) -> pd.DataFrame:
     """
     Join combine measurements onto the main dataset.
     Combine data uses pfr_id as key — we route through rosters_df to get player_id.
     Adds: combine_forty, combine_weight, combine_height, combine_vertical, combine_bench.
+    Note: combine height is stored as "feet-inches" string (e.g. "6-3") and is
+    converted to total inches (75.0) so sklearn's SimpleImputer can process it.
     """
     combine_cols = ["pfr_id", "forty", "wt", "ht", "vertical", "bench"]
     combine_cols = [c for c in combine_cols if c in combine_df.columns]
@@ -186,6 +199,11 @@ def merge_combine_data(nfl_df: pd.DataFrame, combine_df: pd.DataFrame,
                          "ht": "combine_height", "vertical": "combine_vertical",
                          "bench": "combine_bench"})
     )
+    # Convert height from "6-3" string format to numeric inches
+    if "combine_height" in combine_slim.columns:
+        combine_slim["combine_height"] = combine_slim["combine_height"].apply(
+            _parse_height_to_inches
+        )
 
     # Map pfr_id → player_id via rosters
     if "pfr_id" in rosters_df.columns and "player_id" in rosters_df.columns:
