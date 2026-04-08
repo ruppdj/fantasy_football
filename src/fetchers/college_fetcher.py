@@ -158,7 +158,14 @@ def fetch_college_stats(draft_seasons: list, force: bool = False) -> pd.DataFram
             df["rec_tds"] = 0
             df["rec_atts"] = 0
 
-        df = df.fillna(0)
+        # Fill only numeric columns with 0 — string columns (player_name, team)
+        # must not be filled with 0 or PyArrow will reject the mixed types on save.
+        numeric_cols = df.select_dtypes(include="number").columns
+        df[numeric_cols] = df[numeric_cols].fillna(0)
+        # Forward-fill string identity columns from the other side of the outer merge
+        for col in ["player_name", "team", "conference"]:
+            if col in df.columns:
+                df[col] = df[col].fillna("").astype(str)
         df["college_season"] = college_year
         df["draft_season"] = draft_season
 
