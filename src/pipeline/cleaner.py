@@ -119,6 +119,15 @@ def merge_sleeper(nfl_df: pd.DataFrame, sleeper_df: pd.DataFrame) -> pd.DataFram
     sleeper_slim["sleeper_id"] = sleeper_slim["sleeper_id"].astype(str)
 
     merged = nfl_df.merge(sleeper_slim, on="sleeper_id", how="left")
+
+    # Coalesce wopr columns — Sleeper merge can produce wopr_x/wopr_y collision.
+    # wopr_y (from nfl_data_py seasonal data, 0–1 range) is the correct one.
+    if "wopr_x" in merged.columns and "wopr_y" in merged.columns:
+        merged["wopr"] = merged["wopr_y"].fillna(merged["wopr_x"])
+        merged.drop(columns=["wopr_x", "wopr_y"], inplace=True)
+    elif "wopr_x" in merged.columns:
+        merged = merged.rename(columns={"wopr_x": "wopr"})
+
     return merged
 
 
@@ -246,7 +255,7 @@ def merge_college_stats(nfl_df: pd.DataFrame, college_df: pd.DataFrame,
     college_cols = [
         "cfb_player_id", "college_rec_yards", "college_rec_tds", "college_targets",
         "college_rush_yards", "college_rush_tds", "college_rush_atts",
-        "college_dominator_rate",
+        "college_dominator_rate", "college_years",
     ]
     college_cols = [c for c in college_cols if c in college_df.columns]
     college_slim = college_df[college_cols].dropna(subset=["cfb_player_id"]).copy()

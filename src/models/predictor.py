@@ -29,7 +29,7 @@ FEATURE_COLS = [
     # Rookie flag
     "is_rookie",
     # Core NFL stats
-    "age_at_season", "years_exp",
+    "age_at_season",
     "ppr_pts_prev1", "ppr_pts_prev2",
     "fantasy_points_ppr", "ppr_per_game",
     "td_rate",
@@ -92,7 +92,7 @@ def split_data(df: pd.DataFrame):
     y_test = test[TARGET_COL]
 
     # Keep metadata for prediction output
-    meta_cols = ["player_id", "full_name", "position", "season"]
+    meta_cols = ["player_id", "full_name", "position", "season", "is_rookie"]
     meta_cols = [c for c in meta_cols if c in df.columns]
     meta_test = test[meta_cols].copy()
 

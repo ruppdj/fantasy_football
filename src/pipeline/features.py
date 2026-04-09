@@ -27,11 +27,17 @@ def get_engine():
 def add_rookie_flag(df: pd.DataFrame) -> pd.DataFrame:
     """
     Add is_rookie flag: 1 for a player's first NFL season, 0 otherwise.
-    First season = the minimum season observed for that player_id.
+    Uses draft_season (from draft picks join) when available — this correctly
+    identifies rookies even when the dataset starts mid-career (e.g. 2012 dataset
+    would otherwise tag Brady/Manning as rookies via min(season)).
+    Falls back to min(season) per player if draft_season is absent.
     """
     df = df.copy()
-    first_season = df.groupby("player_id")["season"].transform("min")
-    df["is_rookie"] = (df["season"] == first_season).astype(int)
+    if "draft_season" in df.columns:
+        df["is_rookie"] = (df["season"] == df["draft_season"]).astype(int)
+    else:
+        first_season = df.groupby("player_id")["season"].transform("min")
+        df["is_rookie"] = (df["season"] == first_season).astype(int)
     return df
 
 
@@ -153,7 +159,7 @@ def select_model_features(df: pd.DataFrame) -> pd.DataFrame:
         # Rookie flag
         "is_rookie",
         # Core NFL stats
-        "age_at_season", "years_exp",
+        "age_at_season",
         "ppr_pts_prev1", "ppr_pts_prev2",
         "fantasy_points_ppr",
         "ppr_per_game",
