@@ -5,6 +5,7 @@ handles nulls, and loads into SQLite tables.
 """
 
 import os
+import re
 import pandas as pd
 from sqlalchemy import create_engine, text
 
@@ -238,12 +239,33 @@ def merge_injury_data(nfl_df: pd.DataFrame, injury_df: pd.DataFrame) -> pd.DataF
     return nfl_df.merge(injury_slim, on=["player_id", "season"], how="left")
 
 
+def _normalize_name(n) -> str:
+    """
+    Normalize a player name for fuzzy matching:
+    lowercase, remove punctuation, collapse whitespace, strip name suffixes.
+    """
+    if pd.isna(n):
+        return ""
+    n = str(n).lower().strip()
+    n = re.sub(r"[^a-z ]", "", n)          # remove apostrophes, dots, hyphens
+    n = re.sub(r"\s+", " ", n).strip()
+    for suffix in [" jr", " sr", " ii", " iii", " iv"]:
+        if n.endswith(suffix):
+            n = n[: -len(suffix)].strip()
+    return n
+
+
 def merge_college_stats(nfl_df: pd.DataFrame, college_df: pd.DataFrame,
                         draft_df: pd.DataFrame) -> pd.DataFrame:
     """
     Join college production stats onto the main dataset for drafted players.
-    Routes through draft_df (which has cfb_player_id + player_id) to link
-    college stats to NFL player_id.
+
+    Uses normalized player name + draft_season as the join key. The cfb_player_id
+    from nfl_data_py uses slug format (e.g. 'bryce-young-1') while the CFBD API
+    returns numeric IDs — these never match, so name-based matching is used instead.
+
+    Requires that merge_draft_data() was called first so that 'draft_season' and
+    'full_name' are already in nfl_df.
 
     College stats are for the final college season — only meaningful for rookies,
     but kept for all seasons as a static player attribute.
@@ -252,32 +274,52 @@ def merge_college_stats(nfl_df: pd.DataFrame, college_df: pd.DataFrame,
         print("Warning: college stats empty — skipping college merge.")
         return nfl_df
 
-    college_cols = [
-        "cfb_player_id", "college_rec_yards", "college_rec_tds", "college_targets",
+    if "draft_season" not in nfl_df.columns or "full_name" not in nfl_df.columns:
+        print("Warning: draft_season or full_name not in dataset — skipping college merge.")
+        return nfl_df
+
+    feature_cols = [
+        "college_rec_yards", "college_rec_tds", "college_targets",
         "college_rush_yards", "college_rush_tds", "college_rush_atts",
         "college_dominator_rate", "college_years",
     ]
-    college_cols = [c for c in college_cols if c in college_df.columns]
-    college_slim = college_df[college_cols].dropna(subset=["cfb_player_id"]).copy()
-    college_slim["cfb_player_id"] = college_slim["cfb_player_id"].astype(str)
+    feature_cols = [c for c in feature_cols if c in college_df.columns]
 
-    # Get cfb_player_id → player_id mapping from draft data
-    if "cfb_player_id" not in draft_df.columns or "player_id" not in draft_df.columns:
-        print("Warning: cfb_player_id not in draft data — skipping college merge.")
-        return nfl_df
-
-    id_map = (
-        draft_df[["player_id", "cfb_player_id"]]
-        .dropna()
-        .drop_duplicates("player_id")
-        .copy()
+    # Build college lookup keyed by normalized_name|draft_season
+    college_slim = college_df[["player_name", "draft_season"] + feature_cols].copy()
+    college_slim["_name_key"] = college_slim["player_name"].apply(_normalize_name)
+    college_slim["_join_key"] = (
+        college_slim["_name_key"] + "|" + college_slim["draft_season"].astype(str)
     )
-    id_map["cfb_player_id"] = id_map["cfb_player_id"].astype(str)
+    # For any name collision within a draft class, keep the row with most receiving yards
+    if "college_rec_yards" in college_slim.columns:
+        college_slim = college_slim.sort_values("college_rec_yards", ascending=False)
+    college_slim = college_slim.drop_duplicates("_join_key")
 
-    college_with_id = college_slim.merge(id_map, on="cfb_player_id", how="inner")
-    college_with_id = college_with_id.drop(columns=["cfb_player_id"]).drop_duplicates("player_id")
+    # Build matching key on NFL side
+    # draft_season can be float (NaN for undrafted) — convert to nullable int then str
+    nfl_copy = nfl_df.copy()
+    nfl_copy["_name_key"] = nfl_copy["full_name"].apply(_normalize_name)
+    draft_season_str = (
+        pd.to_numeric(nfl_copy["draft_season"], errors="coerce")
+        .dropna()
+        .astype(int)
+        .astype(str)
+    )
+    nfl_copy["_draft_season_str"] = draft_season_str
+    nfl_copy["_draft_season_str"] = nfl_copy["_draft_season_str"].fillna("")
+    nfl_copy["_join_key"] = nfl_copy["_name_key"] + "|" + nfl_copy["_draft_season_str"]
 
-    return nfl_df.merge(college_with_id, on="player_id", how="left")
+    merged = nfl_copy.merge(
+        college_slim[["_join_key"] + feature_cols],
+        on="_join_key",
+        how="left",
+    )
+    merged.drop(columns=["_name_key", "_draft_season_str", "_join_key"], inplace=True)
+
+    matched = merged[feature_cols[0]].notna().sum() if feature_cols else 0
+    print(f"College stats: {matched} player-seasons matched via name+draft_season")
+    return merged
 
 
 def build_clean_dataset(
