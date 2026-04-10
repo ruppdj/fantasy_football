@@ -89,18 +89,70 @@ def add_lagged_injury(df: pd.DataFrame) -> pd.DataFrame:
 
 def add_target_variable(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Add next-season PPR points as the regression target.
-    Only rows where the next season also meets the MIN_GAMES_TARGET threshold
-    are kept as valid training samples.
+    Add dynasty-aware target: weighted 2-year PPR with age discount.
+
+    Target formula:
+        dynasty_value = (0.4 * ppr_year1 + 0.6 * ppr_year2) * age_discount
+        age_discount  = 1 / (1 + 0.04 * max(0, age_at_season - 22))
+
+    Year 2 is weighted higher (0.6) because it better reflects sustained talent
+    and avoids rookie/injury volatility in year 1. The age discount penalizes
+    older veterans — a 22-year-old and a 29-year-old with equal output have
+    very different dynasty values because of remaining career length.
+
+    Rows with only year 1 available (player's second-to-last season) use year 1
+    alone with the age discount applied. Rows with no next season are dropped.
+
+    Also keeps `ppr_pts_next` (year 1 only) for comparison and evaluation.
     """
     df = df.sort_values(["player_id", "season"]).copy()
+
+    # Year 1 and year 2 ahead
     df["ppr_pts_next"] = df.groupby("player_id")["fantasy_points_ppr"].shift(-1)
     df["games_next"] = df.groupby("player_id")["games"].shift(-1)
+    df["ppr_pts_next2"] = df.groupby("player_id")["fantasy_points_ppr"].shift(-2)
+    df["games_next2"] = df.groupby("player_id")["games"].shift(-2)
 
-    # Mark rows where next season is valid (not the final year, enough games)
-    df["has_next_season"] = (
-        df["ppr_pts_next"].notna() & (df["games_next"] >= MIN_GAMES_TARGET)
+    # Age discount: 1.0 at age 22, declining 4% per year above 22
+    # Capped at 1.0 (no bonus for being younger than 22)
+    if "age_at_season" in df.columns:
+        df["age_discount"] = 1.0 / (
+            1.0 + 0.04 * (df["age_at_season"] - 22).clip(lower=0)
+        )
+    else:
+        df["age_discount"] = 1.0
+
+    # Year 1 validity: next season exists and meets games threshold
+    year1_valid = df["ppr_pts_next"].notna() & (df["games_next"] >= MIN_GAMES_TARGET)
+    # Year 2 validity: two seasons ahead also meets threshold
+    year2_valid = df["ppr_pts_next2"].notna() & (df["games_next2"] >= MIN_GAMES_TARGET)
+
+    # Boundary detection: seasons within 1 year of the dataset maximum
+    # cannot have a complete 2-year window — drop them to avoid training on
+    # incomplete futures. A player who left the NFL (year 2 = no record) is
+    # NOT a boundary case — their zero production in year 2 is real signal.
+    max_season = df["season"].max()
+    at_boundary = df["season"] >= (max_season - 1)
+
+    ppr_y1 = df["ppr_pts_next"].fillna(0)
+    ppr_y2 = df["ppr_pts_next2"].fillna(0)
+
+    df["dynasty_value"] = np.where(
+        year1_valid & year2_valid,
+        # Full 2-year window available
+        (0.4 * ppr_y1 + 0.6 * ppr_y2) * df["age_discount"],
+        np.where(
+            year1_valid & ~at_boundary,
+            # Year 1 valid, year 2 missing because player left NFL (not boundary)
+            # Year 2 = 0 implicitly; weight on year 1 only
+            ppr_y1 * df["age_discount"],
+            np.nan,  # boundary row or no valid year 1 — drop
+        ),
     )
+
+    # Row is usable for training if year 1 is valid AND not at data boundary
+    df["has_next_season"] = year1_valid & ~at_boundary
+
     return df
 
 
@@ -154,8 +206,10 @@ def select_model_features(df: pd.DataFrame) -> pd.DataFrame:
     feature_cols = [
         # Identifiers
         "player_id", "full_name", "position", "season",
-        # Target
-        "ppr_pts_next",
+        # Targets (keep both for evaluation)
+        "dynasty_value",   # primary target: weighted 2-yr PPR with age discount
+        "ppr_pts_next",    # year-1 PPR kept for comparison and naive baseline
+        "age_discount",    # expose so notebooks can inspect discount applied
         # Rookie flag
         "is_rookie",
         # Core NFL stats
@@ -178,10 +232,12 @@ def select_model_features(df: pd.DataFrame) -> pd.DataFrame:
         # Combine athleticism
         "combine_forty", "combine_weight", "combine_height",
         "combine_vertical", "combine_bench",
-        # College production
+        # College production — skill positions
         "college_rec_yards", "college_rec_tds", "college_targets",
         "college_rush_yards", "college_rush_tds",
         "college_dominator_rate", "college_years",
+        # College production — QBs
+        "college_pass_yards", "college_pass_tds", "college_pass_ints", "college_pass_atts",
         # Position dummies
         "pos_QB", "pos_RB", "pos_WR", "pos_TE",
     ]
@@ -189,8 +245,9 @@ def select_model_features(df: pd.DataFrame) -> pd.DataFrame:
     available = [c for c in feature_cols if c in df.columns]
     model_df = df[df["has_next_season"] == True][available].copy()
 
-    # Only require target and age — everything else handled by imputer
-    model_df = model_df.dropna(subset=["ppr_pts_next", "age_at_season"])
+    # Require dynasty_value (or ppr_pts_next as fallback) and age
+    target_col = "dynasty_value" if "dynasty_value" in model_df.columns else "ppr_pts_next"
+    model_df = model_df.dropna(subset=[target_col, "age_at_season"])
 
     rookie_count = model_df["is_rookie"].sum() if "is_rookie" in model_df.columns else 0
     print(f"Model-ready dataset: {len(model_df)} rows, {len(available)} features "

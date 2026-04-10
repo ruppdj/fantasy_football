@@ -47,15 +47,18 @@ FEATURE_COLS = [
     # Combine athleticism
     "combine_forty", "combine_weight", "combine_height",
     "combine_vertical", "combine_bench",
-    # College production
+    # College production — skill positions
     "college_rec_yards", "college_rec_tds", "college_targets",
     "college_rush_yards", "college_rush_tds",
     "college_dominator_rate", "college_years",
+    # College production — QBs
+    "college_pass_yards", "college_pass_tds", "college_pass_ints", "college_pass_atts",
     # Position dummies
     "pos_QB", "pos_RB", "pos_WR", "pos_TE",
 ]
 
-TARGET_COL = "ppr_pts_next"
+TARGET_COL = "dynasty_value"   # weighted 2-yr PPR with age discount (see features.py)
+COMPARE_COL = "ppr_pts_next"  # kept alongside for naive baseline and comparison
 
 # Train: 2016-2021 | Val: 2022 | Test: 2023
 TRAIN_END = 2021
@@ -79,6 +82,12 @@ def split_data(df: pd.DataFrame):
     Returns (X_train, y_train, X_val, y_val, X_test, y_test, meta_test)
     """
     available_features = [c for c in FEATURE_COLS if c in df.columns]
+
+    # Guard against accidental target leakage — these columns must never enter X
+    _future_cols = {"dynasty_value", "ppr_pts_next", "ppr_pts_next2",
+                    "games_next", "games_next2", "age_discount"}
+    _leaked = _future_cols.intersection(set(available_features))
+    assert not _leaked, f"Target leakage detected in FEATURE_COLS: {_leaked}"
 
     train = df[df["season"] <= TRAIN_END]
     val = df[df["season"] == VAL_YEAR]
@@ -177,11 +186,22 @@ def train_and_evaluate(df: pd.DataFrame) -> tuple[dict, pd.DataFrame]:
 
     # Build prediction output DataFrame
     pred_df = meta_test.copy()
-    pred_df["actual_ppr_next"] = y_test.values
-    pred_df["predicted_ppr_next"] = best_preds
-    pred_df["error"] = pred_df["predicted_ppr_next"] - pred_df["actual_ppr_next"]
-    pred_df = pred_df.sort_values("predicted_ppr_next", ascending=False).reset_index(drop=True)
+    pred_df["actual_dynasty_value"] = y_test.values
+    pred_df["predicted_dynasty_value"] = best_preds
+    pred_df["error"] = pred_df["predicted_dynasty_value"] - pred_df["actual_dynasty_value"]
+    pred_df = pred_df.sort_values("predicted_dynasty_value", ascending=False).reset_index(drop=True)
     pred_df["predicted_rank"] = pred_df.index + 1
+
+    # Rookie vs. veteran split evaluation
+    if "is_rookie" in pred_df.columns:
+        print("\n=== Test Results — Rookie vs. Veteran Split ===")
+        valid = pred_df.dropna(subset=["actual_dynasty_value", "predicted_dynasty_value"])
+        rookies = valid[valid["is_rookie"] == 1]
+        vets = valid[valid["is_rookie"] == 0]
+        if len(rookies) > 0:
+            evaluate(f"  Rookies  (n={len(rookies)})", rookies["actual_dynasty_value"], rookies["predicted_dynasty_value"])
+        if len(vets) > 0:
+            evaluate(f"  Veterans (n={len(vets)})", vets["actual_dynasty_value"], vets["predicted_dynasty_value"])
 
     return {"results": results, "best_model": best_model}, pred_df
 

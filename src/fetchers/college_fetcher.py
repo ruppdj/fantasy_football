@@ -41,6 +41,8 @@ LOOKBACK_YEARS = 4
 # statType → output column name for each category
 REC_STAT_MAP  = {"YDS": "rec_yards", "TD": "rec_tds", "REC": "rec_atts"}
 RUSH_STAT_MAP = {"YDS": "rush_yards", "TD": "rush_tds", "CAR": "rush_atts"}
+PASS_STAT_MAP = {"YDS": "pass_yards", "TD": "pass_tds", "INT": "pass_ints",
+                 "ATT": "pass_atts", "COMPLETIONS": "pass_completions"}
 
 
 def _cache_path(name: str) -> str:
@@ -150,30 +152,63 @@ def _fetch_year_raw(college_year: int) -> pd.DataFrame:
     receiving = _fetch_cfbd_stats(college_year, "receiving")
     time.sleep(REQUEST_DELAY_SECONDS)
     rushing = _fetch_cfbd_stats(college_year, "rushing")
+    time.sleep(REQUEST_DELAY_SECONDS)
+    passing = _fetch_cfbd_stats(college_year, "passing")
 
-    if not receiving and not rushing:
+    if not receiving and not rushing and not passing:
         return pd.DataFrame()
 
     rec_df  = _records_to_df(receiving, REC_STAT_MAP)
     rush_df = _records_to_df(rushing,   RUSH_STAT_MAP)
+    pass_df = _records_to_df(passing,   PASS_STAT_MAP)
 
-    # Outer merge so players with only rushing or only receiving are included
-    if not rec_df.empty and not rush_df.empty:
-        df = rec_df.merge(
-            rush_df[["cfb_player_id"] + list(RUSH_STAT_MAP.values())],
-            on="cfb_player_id",
-            how="outer",
-        )
-    elif not rec_df.empty:
+    # Start with receiving (broadest skill-position set)
+    if not rec_df.empty:
         df = rec_df.copy()
-        for col in RUSH_STAT_MAP.values():
-            df[col] = 0
     elif not rush_df.empty:
-        df = rush_df.copy()
+        df = rush_df[["cfb_player_id", "player_name", "team", "conference"]].copy()
+        for col in REC_STAT_MAP.values():
+            df[col] = 0
+    elif not pass_df.empty:
+        df = pass_df[["cfb_player_id", "player_name", "team", "conference"]].copy()
         for col in REC_STAT_MAP.values():
             df[col] = 0
     else:
         return pd.DataFrame()
+
+    # Merge rushing
+    if not rush_df.empty:
+        df = df.merge(
+            rush_df[["cfb_player_id"] + list(RUSH_STAT_MAP.values())],
+            on="cfb_player_id", how="outer",
+        )
+        # Restore identity columns lost in outer merge for rush-only players
+        for col in ["player_name", "team", "conference"]:
+            if f"{col}_x" in df.columns:
+                df[col] = df[f"{col}_x"].fillna(df.get(f"{col}_y", ""))
+                df.drop(columns=[c for c in [f"{col}_x", f"{col}_y"] if c in df.columns], inplace=True)
+    else:
+        for col in RUSH_STAT_MAP.values():
+            df[col] = 0
+
+    # Merge passing (QBs — outer so QBs with no rec/rush stats are included)
+    if not pass_df.empty:
+        df = df.merge(
+            pass_df[["cfb_player_id"] + list(PASS_STAT_MAP.values())],
+            on="cfb_player_id", how="outer",
+        )
+        for col in ["player_name", "team", "conference"]:
+            if f"{col}_x" in df.columns:
+                df[col] = df[f"{col}_x"].fillna(df.get(f"{col}_y", ""))
+                df.drop(columns=[c for c in [f"{col}_x", f"{col}_y"] if c in df.columns], inplace=True)
+    else:
+        for col in PASS_STAT_MAP.values():
+            df[col] = 0
+
+    # Ensure all expected stat columns exist (fill 0 if category had no data)
+    for col in list(REC_STAT_MAP.values()) + list(RUSH_STAT_MAP.values()) + list(PASS_STAT_MAP.values()):
+        if col not in df.columns:
+            df[col] = 0
 
     # Fill missing numeric stats with 0, keep strings clean
     numeric_cols = df.select_dtypes(include="number").columns
@@ -269,12 +304,17 @@ def fetch_college_stats(draft_seasons: list, force: bool = False) -> pd.DataFram
 
         # Rename stat columns to final feature names
         final_df = final_df.rename(columns={
-            "rec_yards": "college_rec_yards",
-            "rec_tds":   "college_rec_tds",
-            "rec_atts":  "college_targets",
-            "rush_yards": "college_rush_yards",
-            "rush_tds":   "college_rush_tds",
-            "rush_atts":  "college_rush_atts",
+            "rec_yards":        "college_rec_yards",
+            "rec_tds":          "college_rec_tds",
+            "rec_atts":         "college_targets",
+            "rush_yards":       "college_rush_yards",
+            "rush_tds":         "college_rush_tds",
+            "rush_atts":        "college_rush_atts",
+            "pass_yards":       "college_pass_yards",
+            "pass_tds":         "college_pass_tds",
+            "pass_ints":        "college_pass_ints",
+            "pass_atts":        "college_pass_atts",
+            "pass_completions": "college_pass_completions",
         })
 
         # Compute dominator rate: player yards+TDs as % of team totals
